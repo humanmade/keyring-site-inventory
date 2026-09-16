@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<ruleset name="humanmade">
+	<description>PHP coding standards for the HumanMade project</description>
+
+	<!-- Only check PHP files -->
+	<arg name="extensions" value="php" />
+
+	<!-- Append arg -s to phpcs to display the name of failed sniffs -->
+	<arg value="s"/>
+
+	<!-- Set a minimum PHP version for PHPCompatibility -->
+	<config name="testVersion" value="8.2-" />
+
+	<!-- What to scan -->
+	<file>./inc/</file>
+	<file>./tests/</file>
+	<file>keyring-site-inventory.php</file>
+
+	<exclude-pattern>*/vendor/</exclude-pattern>
+
+	<!-- Check for PHP cross-version compatibility -->
+	<rule ref="PHPCompatibilityWP" />
+
+	<!-- Use HM Coding Standards -->
+	<rule ref="HM">
+		<!-- Don't restrict file and directory names -->
+		<exclude name="HM.Files.NamespaceDirectoryName" />
+		<exclude name="HM.Files.FunctionFileName.WrongFile" />
+
+		<!-- Exclude short description sniff so short `@var` notation can be used -->
+		<exclude name="Generic.Commenting.DocComment.MissingShort"/>
+
+		<!-- This faulty sniff has been removed in the most recent PSR2R standard, but it is still included in the HM one -->
+		<exclude name="PSR2R.Namespaces.UseInAlphabeticalOrder.Order"/>
+
+		<!-- Preserve the existing project style contract, matching the host project. -->
+		<exclude name="HM.Security.EscapeOutput.OutputNotEscaped"/>
+		<exclude name="Modernize.FunctionCalls.Dirname.FileConstant"/>
+		<exclude name="PEAR.Files.IncludingFile.BracketsNotRequired"/>
+		<exclude name="PSR2.Methods.FunctionClosingBrace.SpacingBeforeClose"/>
+		<exclude name="PSR12.Classes.ClassInstantiation.MissingParentheses"/>
+		<exclude name="PSR12.Functions.ReturnTypeDeclaration.SpaceBeforeColon"/>
+		<exclude name="Squiz.Functions.MultiLineFunctionDeclaration.SpaceAfterFunction"/>
+		<exclude name="Universal.Operators.DisallowStandalonePostIncrementDecrement.PostIncrementFound"/>
+
+		<!-- Not applicable to a MU plugin: it registers hooks at file scope. -->
+		<exclude name="PSR1.Files.SideEffects.FoundWithSymbols"/>
+	</rule>
+</ruleset>
+

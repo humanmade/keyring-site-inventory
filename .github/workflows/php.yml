@@ -1,0 +1,49 @@
+name: PHP Code Quality
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+    paths:
+      - '**.php'
+      - '.phpcs.xml'
+      - 'composer.json'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  phpcs:
+    name: PHPCS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          tools: cs2pr
+
+      - name: Install Composer dependencies
+        run: composer install --no-progress --no-interaction --no-ansi
+
+      - name: Run PHPCS
+        run: vendor/bin/phpcs -q --report=checkstyle | cs2pr
+
+      - name: Lint PHP syntax
+        run: composer lint
+
