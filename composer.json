@@ -25,7 +25,6 @@
 	"scripts": {
 		"phpcs": "phpcs",
 		"phpcbf": "phpcbf",
-		"lint": "php -l keyring-site-inventory.php && php -l inc/service-user.php && php -l inc/site-inventory.php"
+		"lint": "php -l keyring-site-inventory.php && php -l inc/site-inventory.php"
 	}
 }
-

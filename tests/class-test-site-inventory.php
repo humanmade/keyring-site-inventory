@@ -11,51 +11,118 @@ use WP_Error;
 use WP_REST_Request;
 use WP_REST_Response;
 use WP_UnitTestCase;
-use function HM\Keyring\Service_User\is_service_user;
-use function HM\Keyring\Service_User\permission_callback;
+use WP_User;
 use function HM\Keyring\Site_Inventory\handle_request;
-use const HM\Keyring\Service_User\CAPABILITY;
+use function HM\Keyring\Site_Inventory\is_service_login;
+use function HM\Keyring\Site_Inventory\permission_callback;
+use function HM\Keyring\Site_Inventory\registered_at;
+use function HM\Keyring\Site_Inventory\required_capability;
+use function HM\Keyring\Site_Inventory\with_implied_memberships;
 
 /**
- * Verify the read-only roster contract, capability scope and role resolution.
+ * Verify the read-only roster contract, its WordPress authorisation and role resolution.
  */
 class Test_Site_Inventory extends WP_UnitTestCase {
 	/**
-	 * Login of the service user under test.
+	 * Login of the authorised reader: an ordinary account that holds the capability.
 	 */
-	private const LOGIN = 'keyring';
+	private const READER_LOGIN = 'inventory-reader';
 
 	/**
-	 * ID of the service user.
+	 * Login of an ordinary person on the network.
+	 */
+	private const PERSON_LOGIN = 'ordinary';
+
+	/**
+	 * A login that looks automated but is not a declared machine account.
+	 */
+	private const MACHINE_LOGIN = 'keyring';
+
+	/**
+	 * Login of a user holding no role, and therefore no capabilities.
+	 */
+	private const UNPRIVILEGED_LOGIN = 'roleless';
+
+	/**
+	 * ID of the user that holds the required capability.
 	 *
 	 * @var int
 	 */
-	private int $service_user = 0;
+	private int $reader = 0;
 
 	/**
-	 * ID of an ordinary authenticated user, used for the 403 case.
+	 * ID of an ordinary person, used for roster assertions.
 	 *
 	 * @var int
 	 */
-	private int $other_user = 0;
+	private int $person = 0;
 
 	/**
-	 * Create the service and non-service users.
+	 * ID of the account whose login merely looks automated.
+	 *
+	 * @var int
+	 */
+	private int $machine = 0;
+
+	/**
+	 * ID of a user with no role at all, used for the 403 case.
+	 *
+	 * @var int
+	 */
+	private int $unprivileged = 0;
+
+	/**
+	 * Saved HTTPS server value, restored after each test.
+	 *
+	 * @var string|null
+	 */
+	private ?string $https = null;
+
+	/**
+	 * Create the users and present the request as HTTPS.
+	 *
+	 * The route requires TLS before anything else, so the transport has to be
+	 * simulated or every authorisation assertion would stop at the HTTPS check.
 	 */
 	public function set_up() : void {
 		parent::set_up();
 
-		$this->service_user = (int) self::factory()->user->create( [
-			'user_login' => self::LOGIN,
+		$this->https = isset( $_SERVER['HTTPS'] ) ? (string) $_SERVER['HTTPS'] : null;
+		$_SERVER['HTTPS'] = 'on';
+
+		$this->reader = (int) self::factory()->user->create( [
+			'user_login' => self::READER_LOGIN,
+			'role'       => 'administrator',
+		] );
+		$this->person = (int) self::factory()->user->create( [
+			'user_login' => self::PERSON_LOGIN,
 			'role'       => 'subscriber',
 		] );
-		$this->other_user = (int) self::factory()->user->create( [
-			'user_login' => 'ordinary',
+		$this->machine = (int) self::factory()->user->create( [
+			'user_login' => self::MACHINE_LOGIN,
 			'role'       => 'subscriber',
 		] );
 
-		// The capability is only granted inside a REST request.
-		add_filter( 'keyring_site_inventory_is_rest_request', '__return_true' );
+		// An explicit empty role, because this network relaxes list_users for
+		// members (h2-network's h2_allow_listing_users option), so a subscriber
+		// cannot be assumed to lack it.
+		$this->unprivileged = (int) self::factory()->user->create( [
+			'user_login' => self::UNPRIVILEGED_LOGIN,
+			'role'       => '',
+		] );
+	}
+
+	/**
+	 * Restore the transport so no later test inherits a simulated TLS request.
+	 */
+	public function tear_down() : void {
+		if ( null === $this->https ) {
+			unset( $_SERVER['HTTPS'] );
+		} else {
+			$_SERVER['HTTPS'] = $this->https;
+		}
+
+		parent::tear_down();
 	}
 
 	/**
@@ -74,53 +141,22 @@ class Test_Site_Inventory extends WP_UnitTestCase {
 	}
 
 	/**
-	 * Call the route handler as the service user.
+	 * Call the route handler as the authorised reader.
 	 *
 	 * @param array<string,mixed> $params Request parameters.
 	 * @return WP_REST_Response
 	 */
 	private function fetch( array $params ) : WP_REST_Response {
-		wp_set_current_user( $this->service_user );
+		wp_set_current_user( $this->reader );
 		$result = handle_request( $this->request( $params ) );
 		self::assertNotInstanceOf( WP_Error::class, $result );
 
 		return $result;
 	}
 
-	/** The capability is a request-scoped grant, never a stored one. */
-	public function test_capability_is_not_persisted_to_the_user() : void {
-		$user = new \WP_User( $this->service_user );
-
-		self::assertNotContains( CAPABILITY, array_keys( (array) $user->allcaps ) );
-		$stored = get_user_meta( $this->service_user, 'wp_capabilities', true );
-		self::assertIsArray( $stored );
-		self::assertArrayNotHasKey( CAPABILITY, $stored );
-	}
-
-	/** Inside a REST request only the configured service login is granted. */
-	public function test_capability_is_granted_only_to_the_service_user() : void {
-		wp_set_current_user( $this->service_user );
-		self::assertTrue( current_user_can( CAPABILITY ) );
-
-		wp_set_current_user( $this->other_user );
-		self::assertFalse( current_user_can( CAPABILITY ) );
-	}
-
-	/** Outside a REST request the capability is withheld even for the service user. */
-	public function test_capability_is_withheld_outside_a_rest_request() : void {
-		remove_filter( 'keyring_site_inventory_is_rest_request', '__return_true' );
-		wp_set_current_user( $this->service_user );
-
-		self::assertFalse( current_user_can( CAPABILITY ) );
-
-		add_filter( 'keyring_site_inventory_is_rest_request', '__return_true' );
-	}
-
-	/** The configured service login is matched by login, not by role. */
-	public function test_service_user_is_identified_by_login() : void {
-		self::assertTrue( is_service_user( $this->service_user ) );
-		self::assertFalse( is_service_user( $this->other_user ) );
-		self::assertFalse( is_service_user( 0 ) );
+	/** The roster is governed by a core capability, not one the plugin invents. */
+	public function test_required_capability_defaults_to_list_users() : void {
+		self::assertSame( 'list_users', required_capability() );
 	}
 
 	/** An unauthenticated request is 401, distinct from 403. */
@@ -133,20 +169,129 @@ class Test_Site_Inventory extends WP_UnitTestCase {
 		self::assertSame( 401, $result->get_error_data()['status'] );
 	}
 
-	/** An authenticated non-service user is refused with 403. */
-	public function test_other_authenticated_user_is_403() : void {
-		wp_set_current_user( $this->other_user );
+	/** An authenticated user without the capability is refused with 403. */
+	public function test_authenticated_user_without_the_capability_is_403() : void {
+		self::assertFalse(
+			user_can( $this->unprivileged, required_capability() ),
+			'A user with no role must not hold the required capability.'
+		);
+
+		wp_set_current_user( $this->unprivileged );
 		$result = permission_callback();
 
 		self::assertInstanceOf( WP_Error::class, $result );
-		self::assertSame( 'keyring_forbidden_user', $result->get_error_code() );
+		self::assertSame( 'keyring_forbidden', $result->get_error_code() );
 		self::assertSame( 403, $result->get_error_data()['status'] );
 	}
 
-	/** The service user passes the permission check. */
-	public function test_service_user_passes_permission_callback() : void {
-		wp_set_current_user( $this->service_user );
+	/** Holding the capability is the whole of authorisation: no identity check follows. */
+	public function test_user_with_the_capability_is_allowed() : void {
+		self::assertTrue( user_can( $this->reader, required_capability() ) );
+
+		wp_set_current_user( $this->reader );
 		self::assertTrue( permission_callback() );
+	}
+
+	/**
+	 * A network can move the bar, and the callback reads it at request time.
+	 *
+	 * Also exercises the refusal branch against a capability no account holds,
+	 * independently of how this network maps list_users.
+	 */
+	public function test_required_capability_is_filterable() : void {
+		$capability = 'keyring_capability_held_by_nobody';
+		$filter     = static function () use ( $capability ) : string {
+			return $capability;
+		};
+		add_filter( 'keyring_site_inventory_required_capability', $filter );
+
+		try {
+			self::assertSame( $capability, required_capability() );
+			self::assertFalse( user_can( $this->reader, $capability ) );
+
+			wp_set_current_user( $this->reader );
+			$result = permission_callback();
+
+			self::assertInstanceOf( WP_Error::class, $result );
+			self::assertSame( 'keyring_forbidden', $result->get_error_code() );
+			self::assertSame( 403, $result->get_error_data()['status'] );
+		} finally {
+			remove_filter( 'keyring_site_inventory_required_capability', $filter );
+		}
+
+		self::assertTrue( permission_callback(), 'The reader is authorised again once the bar returns to list_users.' );
+	}
+
+	/** The payload carries email addresses, so plaintext transport is refused. */
+	public function test_request_without_https_is_403() : void {
+		unset( $_SERVER['HTTPS'] );
+		wp_set_current_user( $this->reader );
+
+		$result = permission_callback();
+
+		self::assertInstanceOf( WP_Error::class, $result );
+		self::assertSame( 'keyring_https_required', $result->get_error_code() );
+		self::assertSame( 403, $result->get_error_data()['status'] );
+	}
+
+	/**
+	 * A super admin is allowed, because they hold the capability.
+	 *
+	 * The previous design refused them by identity. Authorisation is now the
+	 * site's ordinary capability model, and a super admin holds every capability.
+	 */
+	public function test_super_admin_is_allowed() : void {
+		if ( ! is_multisite() ) {
+			self::markTestSkipped( 'Super-admin status is multisite only.' );
+		}
+
+		$super = (int) self::factory()->user->create( [ 'role' => 'subscriber' ] );
+		grant_super_admin( $super );
+
+		try {
+			wp_set_current_user( $super );
+			self::assertTrue( permission_callback() );
+		} finally {
+			revoke_super_admin( $super );
+		}
+	}
+
+	/**
+	 * The plugin owns no capability of its own, stored or granted.
+	 *
+	 * A regression guard against reintroducing a bespoke capability and the
+	 * user_has_cap grant that went with it.
+	 */
+	public function test_plugin_grants_no_capability_of_its_own() : void {
+		// The account named after this plugin is included deliberately: it is the
+		// login the removed design granted a capability to.
+		foreach ( [ $this->unprivileged, $this->machine, $this->reader ] as $user_id ) {
+			$user = new WP_User( $user_id );
+			$own  = array_values( array_filter( array_keys( (array) $user->allcaps ), static function ( $cap ) : bool {
+				return str_starts_with( (string) $cap, 'keyring' );
+			} ) );
+
+			self::assertSame( [], $own, 'No capability of this plugin is held by ' . $user->user_login . '.' );
+			self::assertArrayNotHasKey( 'keyring_read_site_inventory', (array) get_user_meta( $user_id, $this->capabilities_meta_key(), true ) );
+
+			wp_set_current_user( $user_id );
+			self::assertFalse( current_user_can( 'keyring_read_site_inventory' ) );
+		}
+	}
+
+	/** The registered route is protected by the permission callback, not left open. */
+	public function test_route_permission_callback_is_enforced() : void {
+		$routes = rest_get_server()->get_routes();
+		self::assertArrayHasKey( '/keyring/v1/site-inventory', $routes );
+
+		$callback = $routes['/keyring/v1/site-inventory'][0]['permission_callback'] ?? null;
+		self::assertIsCallable( $callback );
+
+		wp_set_current_user( 0 );
+		$result = $callback( $this->request() );
+
+		self::assertInstanceOf( WP_Error::class, $result );
+		self::assertSame( 'keyring_not_authenticated', $result->get_error_code() );
 	}
 
 	/** The envelope reconciles its totals and advertises them in headers. */
@@ -204,7 +349,7 @@ class Test_Site_Inventory extends WP_UnitTestCase {
 			self::markTestSkipped( 'Requires a blog capabilities meta key.' );
 		}
 
-		update_user_meta( $this->other_user, $meta_key, [ 'manage_workflows' => true ] );
+		update_user_meta( $this->person, $meta_key, [ 'manage_workflows' => true ] );
 
 		$data = $this->fetch( [ 'per_page' => 200 ] )->get_data();
 		$roles = array_merge( ...array_map( static function ( $user ) : array {
@@ -223,12 +368,12 @@ class Test_Site_Inventory extends WP_UnitTestCase {
 			self::markTestSkipped( 'Requires a blog capabilities meta key.' );
 		}
 
-		update_user_meta( $this->other_user, $meta_key, [] );
+		update_user_meta( $this->person, $meta_key, [] );
 
 		$data    = $this->fetch( [ 'per_page' => 200 ] )->get_data();
 		$by_user = array_column( $data['users'], null, 'id' );
-		self::assertArrayHasKey( $this->other_user, $by_user );
-		self::assertNotEmpty( $by_user[ $this->other_user ]['memberships'] );
+		self::assertArrayHasKey( $this->person, $by_user );
+		self::assertNotEmpty( $by_user[ $this->person ]['memberships'] );
 	}
 
 	/** Roles live on memberships, not on the user record. */
@@ -255,15 +400,6 @@ class Test_Site_Inventory extends WP_UnitTestCase {
 				self::assertContains( $membership['siteId'], $site_ids );
 			}
 		}
-	}
-
-	/** The Keyring service account is reported as a machine account. */
-	public function test_service_user_is_classified_as_a_service_account() : void {
-		$data   = $this->fetch( [ 'per_page' => 200 ] )->get_data();
-		$by_log = array_column( $data['users'], 'accountType', 'login' );
-
-		self::assertSame( 'service', $by_log[ self::LOGIN ] );
-		self::assertSame( 'person', $by_log['ordinary'] );
 	}
 
 	/**
@@ -312,6 +448,7 @@ class Test_Site_Inventory extends WP_UnitTestCase {
 		add_filter( 'users_pre_query', $filter, 10, 3 );
 
 		try {
+			wp_set_current_user( $this->reader );
 			$result = handle_request( $this->request( [ 'per_page' => 5 ] ) );
 		} finally {
 			remove_filter( 'users_pre_query', $filter, 10 );
@@ -322,38 +459,23 @@ class Test_Site_Inventory extends WP_UnitTestCase {
 		self::assertSame( 500, $result->get_error_data()['status'] );
 	}
 
-	/**
-	 * A super admin is refused: the capability alone cannot exclude them.
-	 *
-	 * WP_User::has_cap() short-circuits for super admins before the user_has_cap
-	 * filter runs, so any super admin holds every capability including this one.
-	 * Identity must therefore be checked directly.
-	 */
-	public function test_super_admin_is_refused() : void {
-		$super = self::factory()->user->create( [ 'role' => 'subscriber' ] );
-		grant_super_admin( $super );
-
-		try {
-			wp_set_current_user( $super );
-
-			// Prove the premise: the capability is held without this plugin granting it.
-			self::assertTrue( current_user_can( CAPABILITY ) );
-
-			$result = permission_callback();
-			self::assertInstanceOf( WP_Error::class, $result );
-			self::assertSame( 'keyring_forbidden_user', $result->get_error_code() );
-			self::assertSame( 403, $result->get_error_data()['status'] );
-		} finally {
-			revoke_super_admin( $super );
-		}
-	}
-
-	/** The response reports the authenticated user, not the configured login. */
-	public function test_service_user_identity_is_reported_from_the_request() : void {
+	/** The response reports whoever authenticated, not a configured account. */
+	public function test_requested_by_reports_the_authenticated_user() : void {
 		$data = $this->fetch( [ 'per_page' => 1 ] )->get_data();
 
-		self::assertSame( get_current_user_id(), $data['serviceUser']['id'] );
-		self::assertSame( self::LOGIN, $data['serviceUser']['login'] );
+		self::assertSame( $this->reader, $data['requestedBy']['id'] );
+		self::assertSame( self::READER_LOGIN, $data['requestedBy']['login'] );
+		self::assertFalse( $data['requestedBy']['isSuperAdmin'] );
+
+		// A different caller is reported as themselves: the field is the identity
+		// that authenticated, and the plugin has no opinion about who that is.
+		wp_set_current_user( $this->person );
+		$result = handle_request( $this->request( [ 'per_page' => 1 ] ) );
+		self::assertNotInstanceOf( WP_Error::class, $result );
+
+		$requested_by = $result->get_data()['requestedBy'];
+		self::assertSame( $this->person, $requested_by['id'] );
+		self::assertSame( self::PERSON_LOGIN, $requested_by['login'] );
 	}
 
 	/**
@@ -364,7 +486,7 @@ class Test_Site_Inventory extends WP_UnitTestCase {
 	 * with DST.
 	 */
 	public function test_registration_timestamp_is_utc() : void {
-		$result = \HM\Keyring\Site_Inventory\registered_at( '2012-04-18 17:59:49' );
+		$result = registered_at( '2012-04-18 17:59:49' );
 
 		self::assertSame( '2012-04-18T17:59:49+00:00', $result );
 		self::assertSame( gmdate( 'c', strtotime( '2012-04-18 17:59:49 UTC' ) ), $result );
@@ -490,7 +612,7 @@ class Test_Site_Inventory extends WP_UnitTestCase {
 			],
 		];
 
-		$result = \HM\Keyring\Site_Inventory\with_implied_memberships( $observed, $sites, true );
+		$result = with_implied_memberships( $observed, $sites, true );
 
 		self::assertCount( 1, $result );
 		self::assertSame( [ 'editor' ], $result[0]['roles'] );
@@ -540,33 +662,50 @@ class Test_Site_Inventory extends WP_UnitTestCase {
 
 	/**
 	 * Machine accounts are an explicit, filterable list, never a name pattern.
+	 *
+	 * Nothing is declared by default, so even a login named after this plugin is a
+	 * person until someone reviews it and says otherwise.
 	 */
 	public function test_machine_accounts_are_an_explicit_list() : void {
-		// A name that merely looks automated must not be classified as a service.
-		self::assertFalse( \HM\Keyring\Service_User\is_service_login( 'robot-person' ) );
-		self::assertTrue( \HM\Keyring\Service_User\is_service_login( \HM\Keyring\Service_User\login() ) );
+		self::assertFalse( is_service_login( 'robot-person' ) );
+		self::assertFalse( is_service_login( self::MACHINE_LOGIN ) );
 
-		$filter = static function ( $logins ) {
+		$filter = static function ( $logins ) : array {
 			return array_merge( (array) $logins, [ 'human-bot' ] );
 		};
 		add_filter( 'keyring_site_inventory_service_logins', $filter );
 
 		try {
-			self::assertTrue( \HM\Keyring\Service_User\is_service_login( 'human-bot' ) );
+			self::assertTrue( is_service_login( 'human-bot' ) );
+			self::assertTrue( is_service_login( 'Human-Bot' ), 'Matching is case-insensitive.' );
+			self::assertFalse( is_service_login( 'human-bot-2' ) );
 		} finally {
 			remove_filter( 'keyring_site_inventory_service_logins', $filter );
 		}
 
-		self::assertFalse( \HM\Keyring\Service_User\is_service_login( 'human-bot' ) );
+		self::assertFalse( is_service_login( 'human-bot' ) );
 	}
 
-	/** A configured service login is still classified as a machine account. */
-	public function test_configured_service_login_is_classified_as_service() : void {
-		$data   = $this->fetch( [ 'per_page' => 200 ] )->get_data();
-		$by_log = array_column( $data['users'], 'accountType', 'login' );
+	/** The account type follows the declared list, and nothing is declared by default. */
+	public function test_account_type_follows_the_declared_list() : void {
+		$by_login = array_column( $this->fetch( [ 'per_page' => 200 ] )->get_data()['users'], 'accountType', 'login' );
 
-		// login() always contributes the configured service login to the list.
-		self::assertSame( 'service', $by_log[ \HM\Keyring\Service_User\login() ] );
+		self::assertSame( 'person', $by_login[ self::MACHINE_LOGIN ] );
+		self::assertSame( 'person', $by_login[ self::PERSON_LOGIN ] );
+
+		$filter = static function ( $logins ) : array {
+			return array_merge( (array) $logins, [ self::MACHINE_LOGIN ] );
+		};
+		add_filter( 'keyring_site_inventory_service_logins', $filter );
+
+		try {
+			$by_login = array_column( $this->fetch( [ 'per_page' => 200 ] )->get_data()['users'], 'accountType', 'login' );
+
+			self::assertSame( 'service', $by_login[ self::MACHINE_LOGIN ] );
+			self::assertSame( 'person', $by_login[ self::PERSON_LOGIN ] );
+		} finally {
+			remove_filter( 'keyring_site_inventory_service_logins', $filter );
+		}
 	}
 
 	/** A page past the end returns no users but a truthful total. */

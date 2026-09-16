@@ -10,8 +10,6 @@ use WP_REST_Request;
 use WP_Site;
 use WP_User;
 use WP_User_Query;
-use function HM\Keyring\Service_User\is_service_login;
-use function HM\Keyring\Service_User\permission_callback;
 
 const NAMESPACE_ROUTE = 'keyring/v1';
 const ROUTE = '/site-inventory';
@@ -19,7 +17,130 @@ const SCHEMA = 'keyring-site-inventory/v1';
 const DEFAULT_PER_PAGE = 100;
 const MAX_PER_PAGE = 200;
 
+/**
+ * Capability that gates the roster.
+ *
+ * Deliberately a capability of this plugin's own rather than list_users. WordPress
+ * treats list_users as the bar for reading a complete user list, but sites routinely
+ * relax it: on the hmn.md network a plugin maps it to read, so any logged-in member
+ * holds it. A capability of our own cannot be relaxed by accident.
+ */
+const CAPABILITY = 'keyring_read_site_inventory';
+
+/**
+ * Capability whose holders are granted CAPABILITY.
+ *
+ * Defaults to manage_options, so the route works for administrators without any
+ * per-site configuration, while remaining out of reach of the relaxed list_users
+ * grant. Sites that want a narrower or wider audience change this, or the returned
+ * capability, with the filters below.
+ */
+const GRANTING_CAPABILITY = 'manage_options';
+
+add_filter( 'user_has_cap', __NAMESPACE__ . '\\grant_read_capability', 20, 4 );
+
+/**
+ * Grant the read capability to accounts that hold the granting capability.
+ *
+ * WP_User::has_cap() applies this filter on every check, so the capability is present
+ * in memory only and is never written to the account's stored capabilities. Nothing
+ * here identifies a particular account: it is an ordinary capability check, the same
+ * shape as any plugin that gates its own REST route.
+ *
+ * @param array<string,bool> $allcaps All capabilities for the user.
+ * @param string[] $caps Capabilities being checked.
+ * @param array<int,mixed> $args Arguments passed to the capability check.
+ * @param WP_User $user User object.
+ * @return array<string,bool>
+ */
+function grant_read_capability( array $allcaps, array $caps, array $args, WP_User $user ) : array {
+	if ( ! in_array( required_capability(), $caps, true ) ) {
+		return $allcaps;
+	}
+
+	$granting = (string) apply_filters( 'keyring_site_inventory_granting_capability', GRANTING_CAPABILITY );
+	$grant = $user->has_cap( $granting ) || (bool) apply_filters( 'keyring_site_inventory_grant_capability', false, $user );
+
+	if ( $grant ) {
+		$allcaps[ required_capability() ] = true;
+	}
+
+	return $allcaps;
+}
+
 add_action( 'rest_api_init', __NAMESPACE__ . '\\register_route' );
+
+/**
+ * Capability required to read the roster.
+ *
+ * Defaults to this plugin's own capability, which is granted to accounts holding
+ * GRANTING_CAPABILITY. Authentication remains whatever the site already accepts; an
+ * application password on a qualifying account is the usual choice. Nothing here
+ * identifies a particular account.
+ *
+ * @return string
+ */
+function required_capability() : string {
+	return (string) apply_filters( 'keyring_site_inventory_required_capability', CAPABILITY );
+}
+
+/**
+ * Permission callback for the inventory route.
+ *
+ * Standard WordPress authorisation only. HTTPS is required because the payload
+ * contains email addresses.
+ *
+ * @return true|WP_Error
+ */
+function permission_callback() {
+	if ( ! is_ssl() ) {
+		return new WP_Error(
+			'keyring_https_required',
+			'HTTPS is required.',
+			[ 'status' => 403 ]
+		);
+	}
+
+	if ( ! is_user_logged_in() ) {
+		return new WP_Error(
+			'keyring_not_authenticated',
+			'Authentication is required.',
+			[ 'status' => 401 ]
+		);
+	}
+
+	if ( ! current_user_can( required_capability() ) ) {
+		return new WP_Error(
+			'keyring_forbidden',
+			'You are not allowed to read the site user roster.',
+			[ 'status' => 403 ]
+		);
+	}
+
+	return true;
+}
+
+/**
+ * Whether a login is a declared machine account.
+ *
+ * A reviewed list, never a name pattern: guessing from names would misclassify real
+ * people. Machine accounts are property-specific, so nothing is assumed by default;
+ * declare them with the constant or the filter. Keyring uses this to keep automation
+ * accounts out of its people roster.
+ *
+ * @param string $login WordPress login.
+ * @return bool
+ */
+function is_service_login( string $login ) : bool {
+	$configured = defined( 'KEYRING_SERVICE_LOGINS' )
+		? array_map( 'trim', explode( ',', (string) KEYRING_SERVICE_LOGINS ) )
+		: [];
+
+	$logins = (array) apply_filters( 'keyring_site_inventory_service_logins', $configured );
+	$logins = array_map( 'strtolower', array_map( 'strval', $logins ) );
+
+	return in_array( strtolower( $login ), $logins, true );
+}
 
 /**
  * Register the single read-only route.
@@ -160,9 +281,9 @@ function handle_request( WP_REST_Request $request ) {
 			'siteCount'         => network_site_count(),
 			'includedSiteCount' => count( $sites ),
 		],
-		// Report the identity that actually authenticated, not the configured
-		// login, so the audit record cannot misattribute a read.
-		'serviceUser' => [
+		// The identity that authenticated. The plugin does not decide who may read the
+		// roster, so it reports whoever did.
+		'requestedBy' => [
 			'id'           => get_current_user_id(),
 			'login'        => (string) ( get_userdata( get_current_user_id() )->user_login ?? '' ),
 			'isSuperAdmin' => $multisite ? is_super_admin( get_current_user_id() ) : false,
@@ -316,8 +437,6 @@ function site_record( WP_Site $site ) : array {
 	];
 }
 
-/**
- * Site record for a single-site install, which has no lifecycle flags.
 /**
  * Total sites on the network, including those excluded from this response.
  *
@@ -479,8 +598,6 @@ function registered_roles( array $blog_ids ) : array {
 	return $roles;
 }
 
-/**
- * Multisite network flags, or an empty object on single site.
 /**
  * Add the sites a super admin reaches through network-wide access alone.
  *

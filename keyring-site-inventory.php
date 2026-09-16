@@ -11,5 +11,4 @@ namespace HM\Keyring;
 
 const FILE = __FILE__;
 
-require __DIR__ . '/inc/service-user.php';
 require __DIR__ . '/inc/site-inventory.php';
