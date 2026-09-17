@@ -14,17 +14,28 @@
 		"composer/installers": "^1.0 || ^2.0"
 	},
 	"require-dev": {
-		"humanmade/coding-standards": "^2.5"
+		"humanmade/coding-standards": "^2.5",
+		"phpunit/phpunit": "^9.6",
+		"roots/wordpress-core-installer": "^1.100",
+		"roots/wordpress-full": "~7.0",
+		"wp-phpunit/wp-phpunit": "^6.0 || ^7.0",
+		"yoast/phpunit-polyfills": "^2.0"
 	},
 	"config": {
 		"allow-plugins": {
 			"composer/installers": true,
-			"dealerdirect/phpcodesniffer-composer-installer": true
+			"dealerdirect/phpcodesniffer-composer-installer": true,
+			"roots/wordpress-core-installer": true
 		}
 	},
 	"scripts": {
 		"phpcs": "phpcs",
 		"phpcbf": "phpcbf",
-		"lint": "php -l keyring-site-inventory.php && php -l inc/site-inventory.php"
+		"test": "phpunit -c phpunit.xml.dist",
+		"test:multisite": "phpunit -c phpunit-multisite.xml.dist",
+		"lint": "find . \\( -path ./vendor -o -path ./wordpress \\) -prune -o -name '*.php' -print0 | xargs -0 -n1 -P4 php -l"
+	},
+	"extra": {
+		"wordpress-install-dir": "wordpress"
 	}
 }

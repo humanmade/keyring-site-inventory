@@ -14,6 +14,8 @@ on:
       - '**.php'
       - '.phpcs.xml'
       - 'composer.json'
+      - 'phpunit*.xml.dist'
+      - '.github/workflows/php.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -47,3 +49,52 @@ jobs:
       - name: Lint PHP syntax
         run: composer lint
 
+  phpunit:
+    name: PHPUnit (${{ matrix.wordpress }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - wordpress: single site
+            config: phpunit.xml.dist
+          - wordpress: multisite
+            config: phpunit-multisite.xml.dist
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: wordpress
+          MYSQL_DATABASE: wordpress_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pwordpress"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    env:
+      WP_DB_NAME: wordpress_test
+      WP_DB_USER: root
+      WP_DB_PASSWORD: wordpress
+      WP_DB_HOST: 127.0.0.1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          extensions: mysqli
+
+      - name: Install Composer dependencies
+        run: composer install --no-progress --no-interaction --no-ansi
+
+      - name: Run PHPUnit
+        run: vendor/bin/phpunit -c ${{ matrix.config }}

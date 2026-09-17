@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<phpunit
+	bootstrap="tests/bootstrap.php"
+	colors="true"
+	beStrictAboutTestsThatDoNotTestAnything="false"
+	>
+	<php>
+		<env name="WP_PHPUNIT__TESTS_CONFIG" value="tests/wp-tests-config.php"/>
+		<const name="WP_TESTS_MULTISITE" value="1"/>
+	</php>
+	<testsuites>
+		<testsuite name="keyring-site-inventory">
+			<directory prefix="class-test-" suffix=".php">tests</directory>
+		</testsuite>
+	</testsuites>
+</phpunit>
