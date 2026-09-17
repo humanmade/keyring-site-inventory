@@ -1,159 +1,191 @@
 # Keyring Site Inventory
 
-A read-only WordPress REST endpoint that returns a complete site-user roster, with
-the sites each user belongs to and their role on each site. It is the WordPress half
-of the [Keyring](https://github.com/humanmade/keyring.tools.hmn.md) access inventory.
+Read-only WordPress REST routes that return the network roster: every user, the
+sites they belong to, and their roles on each. It is the WordPress half of the
+[Keyring](https://github.com/humanmade/keyring.tools.hmn.md) access inventory, and
+works on both single site and multisite.
 
-## What it does
+## Routes
 
-Registers one route:
+    GET /wp-json/keyring/v1/users
+    GET /wp-json/keyring/v1/sites
 
-    GET /wp-json/keyring/v1/site-inventory
+Both follow the conventions of core collection endpoints: the body is an array of
+items, pagination is reported in `X-WP-Total` and `X-WP-TotalPages`, `page`,
+`per_page`, `context` and `_fields` behave as they do elsewhere, and the schema is
+published by the route (`OPTIONS`, or the `schema` link) rather than in the body.
 
-Authorization is standard WordPress. The route requires HTTPS, an authenticated
-user, and a capability of this plugin's own, `keyring_read_site_inventory`, which is
-granted to accounts holding `manage_options` (administrators by default). Sites can
-widen or narrow that with filters; see Configuration.
+A user record:
 
-The plugin defines **no identity system**: no service user to create, and no
-account it recognises by name. Authentication is whatever the site already accepts,
-so an application password on any qualifying account will do, and nothing is written
-to that account's stored capabilities.
+    {
+      "id": 12,
+      "username": "jane",
+      "name": "Jane Doe",
+      "slug": "jane",
+      "email": "jane@humanmade.com",
+      "registered_date": "2024-01-02T03:04:05+00:00",
+      "is_super_admin": false,
+      "is_spam": false,
+      "is_deleted": false,
+      "memberships": [
+        { "site_id": 2, "roles": [ "subscriber" ], "implied_by_super_admin": false }
+      ]
+    }
 
-It does define its own capability, rather than gating on `list_users`. WordPress uses
-`list_users` as the bar for reading a complete user list, but sites routinely relax
-it: on the hmn.md network a plugin maps it to `read`, so every logged-in member holds
-it and could read every email address on the network. A capability of our own cannot
-be relaxed by accident, and holding it is granted through the ordinary capability
-system rather than by naming an account.
+A site record:
 
-## Why not the core users endpoint
+    {
+      "id": 2,
+      "url": "https://updates.hmn.md/",
+      "domain": "updates.hmn.md",
+      "path": "/",
+      "public": false,
+      "archived": false,
+      "mature": false
+    }
 
-`GET /wp/v2/users` requires the broad `list_users` capability and, when the caller
-lacks it, silently restricts results to users with published posts — returning a
-smaller roster that still looks complete. It also has no network-wide scope. Both
-behaviours are disqualifying for an access inventory; measured on the hmn.md network,
-the core route returned zero users where this endpoint returned 375.
+`memberships[].site_id` is the join key into the sites collection. A network can
+run several sites on one domain, differing only by path, so `domain` and `path`
+together identify a site for display; `id` identifies it for joins.
 
-## Structure
+## Authorization
 
-    keyring-site-inventory.php        MU loader (required by WordPress's top-level scan)
-    keyring-site-inventory/
-      keyring-site-inventory.php      Plugin header; requires the inc/ files
-      inc/site-inventory.php          The REST route, authorization and roster
-      tests/class-test-site-inventory.php
+Both routes require the `keyring_read_site_inventory` capability. An account holds
+it by explicit grant, or by being a multisite super admin, which WordPress grants
+every capability before any plugin is consulted.
 
-This mirrors the existing `human-bot.php` + `human-bot/` layout used elsewhere in
-the network's MU plugins: one loader at the top level, implementation split into
-`inc/` files under a `HM\Keyring` namespace.
+The plugin defines its own capability because `list_users` is routinely relaxed: on
+the hmn.md network a plugin maps it to `read`, so every logged-in member holds it
+and could read every email address on the network. `manage_options` has the same
+problem at network scale, since each site has its own administrators.
 
-## Installation
+Grants are per site, because that is where WordPress stores capabilities. Grant on
+the site the inventory will be called on, and call that same site: a grant on
+`updates.hmn.md` authorises `https://updates.hmn.md/wp-json/keyring/v1/users` and
+nothing else, while the response still describes the whole network.
 
-Copy the directory into `content/mu-plugins/` with the `keyring-site-inventory.php`
-loader beside it. As a conventional plugin, place the directory in
-`content/plugins/` and activate `keyring-site-inventory.php`.
+The service account appears in its own inventory as a member of that site, with
+whatever role it holds there.
 
-On the hmn.md network, MU plugins in `content/mu-plugins/` auto-load through
-WordPress's standard top-level scan, so no `loader.php` change is needed.
-
-Then create a credential for a machine caller. Any account that qualifies works
-(an administrator by default);
-an application password is the usual choice because it is revocable and scoped to
-that account:
-
-    wp user application-password create <account> "Keyring inventory" --porcelain
-
-Store the login and application password in Keyring's credential store as the
-property's Basic pair. Enable HTTPS: the payload contains email addresses.
-
-## Configuration
-
-| Constant | Meaning |
-| --- | --- |
-| `KEYRING_SERVICE_LOGINS` | Comma-separated machine-account logins to report as `accountType: service`. Empty by default. |
-
-Filters:
+Authentication is whatever the site already accepts; an application password is the
+usual choice because it is revocable and scoped to one account.
 
 | Filter | Purpose |
 | --- | --- |
-| `keyring_site_inventory_required_capability` | Capability required to read the roster. Defaults to `keyring_read_site_inventory`. |
-| `keyring_site_inventory_granting_capability` | Capability whose holders are granted the read capability. Defaults to `manage_options`. |
-| `keyring_site_inventory_grant_capability` | Per-user override; return true to grant the read capability to a specific account. |
-| `keyring_site_inventory_service_logins` | Reviewed list of machine-account logins reported as `accountType: service`. |
+| `keyring_site_inventory_capability` | Capability required to read either collection. Defaults to `keyring_read_site_inventory`. |
 
-`KEYRING_SERVICE_LOGINS` and the filter only affect the `accountType` field. They
-have no bearing on who may call the endpoint. Machine accounts are property-specific
-and nothing is assumed by default, so declare your own; guessing from names would
-misclassify real people.
+## Why not the core users endpoint
 
-## Response
+`GET /wp/v2/users` requires `list_users` and, when the caller lacks it, restricts
+results to users with published posts, returning a smaller roster that still looks
+complete. It also has no network-wide scope. Measured on the hmn.md network, this
+route returns 378 users across 154 sites from a single call.
 
-    {
-      "schema": "keyring-site-inventory/v1",
-      "generatedAt": "2026-09-16T10:00:00+00:00",
-      "multisite": true,
-      "network": { "host": "hmn.md", "siteCount": 154, "includedSiteCount": 154 },
-      "requestedBy": { "id": 486, "login": "keyring", "isSuperAdmin": false },
-      "page": 1, "perPage": 100, "total": 375, "pages": 4,
-      "complete": true,
-      "sites": [ { "id": 2, "host": "updates.hmn.md", "sitePath": "/", "url": "https://updates.hmn.md/", "flags": { "public": false, "archived": false, "spam": false, "deleted": false, "mature": false } } ],
-      "users": [ {
-        "id": 12, "login": "jane", "email": "jane@humanmade.com",
-        "displayName": "Jane Doe", "nicename": "jane",
-        "registeredAt": "2024-01-02T03:04:05+00:00",
-        "accountType": "person", "isSuperAdmin": false,
-        "flags": { "spam": false, "deleted": false },
-        "memberships": [ { "siteId": 2, "host": "updates.hmn.md", "sitePath": "/", "roles": [ "subscriber" ], "impliedBySuperAdmin": false } ]
-      } ],
-      "errors": []
-    }
+## Completeness
 
-Headers: `X-Keyring-Total`, `X-Keyring-Pages`, `X-Keyring-Schema`.
+A short roster would be read as a complete one, so three conditions return a 500
+rather than a smaller result:
 
-Rules:
+- the network enumerates no sites (`keyring_site_inventory_no_sites`);
+- a site's registered roles cannot be read, which would report its members as
+  having no roles (`keyring_site_inventory_roles_unavailable`);
+- a page returns fewer rows than the declared total implies
+  (`keyring_site_inventory_incomplete_page`).
 
-- `total` and `pages` describe the whole scope and reconcile with the rows
-  returned across every page.
-- `complete` is true only when every site in scope was read without error. A
-  failed or skipped site sets `complete: false` and adds a structured `errors`
-  entry; a partial roster is never presented as complete.
-- Membership and roles are taken from core (`get_blogs_of_user()`, `get_user_meta()`,
-  `get_blog_option()`) and trusted as returned.
-- Identity is global (the WordPress user ID is the merge key); roles are
-  per-site. Only registered roles are reported, so custom capabilities stored in
-  the capabilities meta are not mistaken for roles. A user with an empty
-  capabilities row is still a site member, matching WordPress.
-- Super-admin status is separate evidence from the `administrator` role.
-- Deleted and spam sites are excluded. Archived sites are included and flagged.
-- No secrets: absent from the payload are password hashes, activation keys,
-  session tokens, user meta, capability maps and plugin data.
+Deleted and spam sites are out of scope; archived sites are in scope and flagged.
+Roles are intersected with the roles each site has registered, which is the rule
+`WP_User::get_role_caps()` applies, so a custom capability stored beside them is
+reported as a capability rather than a role. A user with an empty capabilities row
+is still a member of that site, matching WordPress.
 
-## Single site and multisite
+Super admins reach every site on a network without being a member of each one.
+Those sites appear in `memberships` with `implied_by_super_admin` set and an empty
+role list, which keeps implied reach and observed membership distinguishable.
 
-`is_multisite()` drives the branch. On a single site the response describes the
-current site and every user has one membership; network-only fields are reported
-as empty objects rather than invented values. On multisite the global users table
-is the identity source and per-site capability rows are the membership source, so
-one person across subsites is one user with several memberships.
+## Layout
+
+    keyring-site-inventory.php          Plugin header, requires inc/ and boots
+    inc/namespace.php                   Hooks and the capability
+    inc/sites.php                       Site scope and per-site role names
+    inc/class-inventory-controller.php  Route registration and authorization
+    inc/class-users-controller.php      The /users collection
+    inc/class-sites-controller.php      The /sites collection
+    tests/bootstrap.php                 Loads the WordPress test library
+    tests/wp-tests-config.php           Test database and core paths
+
+## Installation
+
+As an MU plugin, copy the directory into `content/mu-plugins/` with a loader file
+beside it. As a conventional plugin, place it in `content/plugins/` and activate
+it.
+
+Create the machine account with a role that grants `read`, such as subscriber, and
+grant it the capability on the site Keyring will call. Multisite rejects usernames
+containing anything but lowercase letters and numbers, so no hyphens:
+
+    wp user create keyringservice keyring@example.com --role=subscriber --url=https://updates.hmn.md
+    wp user add-cap keyringservice keyring_read_site_inventory --url=https://updates.hmn.md
+    wp user list-caps keyringservice --url=https://updates.hmn.md
+
+The `read` capability matters on any property running `hm-require-login`, which
+gates every request on `current_user_can( 'read' )` before the route is reached. A
+roleless account authenticates but is stopped at that wall, which returns an empty
+`401` rather than JSON. A JSON `403` with `keyring_site_inventory_cannot_view` means
+the request got through and the account lacks the inventory capability.
+
+Revoking is the same command in reverse, and takes effect immediately:
+
+    wp user remove-cap keyringservice keyring_read_site_inventory --url=https://updates.hmn.md
+
+Then create a credential for that account:
+
+    wp user application-password create keyringservice "Keyring inventory" --porcelain
+
+Store the login and application password in Keyring's credential store as the
+property's Basic pair. WordPress requires HTTPS for application passwords, so the
+payload travels encrypted.
+
+## Switching into sites
+
+When core last discussed a sites endpoint it required one without `switch_to_blog()`,
+because each switch loads that site's autoloaded options.
+
+Site scope is therefore read as IDs only, and membership is derived from the
+capabilities meta keys rather than `get_blogs_of_user()`, which reads each site's
+name and URL through `WP_Site` and switches once per site. The key parsing here is
+the rule that function applies internally.
+
+Registered roles still switch: `get_blog_option()` does so for any site other than
+the current one, as core's own `WP_Roles::get_roles_data()` does. Roles are read
+only for the sites a page references, so the cost scales with the page rather than
+the network. Measured on hmn.md, a page of 100 users spanning 154 sites made 153
+switch and restore pairs, 2 queries and 0.06s warm.
+
+The sites collection resolves each home URL through `WP_Site`, so the result is
+cached in the `site-details` group.
 
 ## Tests
 
-`tests/class-test-site-inventory.php` covers the capability scope, 401/403/200
-boundaries, envelope reconciliation, pagination, role resolution, secret
-exclusion, machine-account classification and multisite flags. Add the directory
-to the host project's PHPUnit configuration to run it.
+`tests/` covers authorization, the collection shape and its headers, pagination,
+parameter validation, schema publication, role resolution, super-admin reach, the
+completeness failures and the switch count. The suite extends `WP_UnitTestCase` and
+dispatches through the REST server, so it exercises the contract a client gets.
 
-The plugin is written to the network's coding standards. It passes the project's
-PHPCS ruleset (`humanmade/coding-standards`) with no errors in the implementation
-files and no errors in the test suite. The one remaining finding is the MU-loader
-file-comment warning that `human-bot.php` and the other top-level MU plugins also
-have.
+Site scope is asserted on the `get_sites()` query, and lifecycle flags by updating
+an existing site. Creating a site in a test issues `CREATE TABLE`, which the test
+case rewrites to `CREATE TEMPORARY TABLE`; those tables belong to the connection
+rather than the transaction, so they survive the rollback that removes the matching
+`wp_blogs` rows and later tests then run against an inconsistent network.
 
-## Guarantees
+    composer test
+    composer test:multisite
 
-- Read-only: the route performs no writes, role changes, user creation, mail or
-  content access.
-- HTTPS required; unauthenticated is 401, and an authenticated user without the
-  required capability is 403.
-- The route is registered only by this plugin and does not alter core endpoint
-  permissions.
+WordPress core is a dev dependency, so `composer install` puts it in `wordpress/`
+and there is nothing else to fetch. Only the database needs configuring, through
+`WP_DB_NAME`, `WP_DB_USER`, `WP_DB_PASSWORD` and `WP_DB_HOST`; `WP_CORE_DIR` points
+at a different checkout if you want one. The defaults are in
+`tests/wp-tests-config.php`. The suite drops and recreates its tables, so give it a
+database of its own.
+
+CI runs both suites, plus PHPCS against `humanmade/coding-standards` and a syntax
+lint.
