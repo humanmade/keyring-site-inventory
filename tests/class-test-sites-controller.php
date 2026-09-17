@@ -168,6 +168,13 @@ class Test_Sites_Controller extends WP_UnitTestCase {
 		}
 
 		$site_id = get_current_blog_id();
+
+		// Archiving fires archive_blog, which ElasticPress answers by asking
+		// Elasticsearch whether the site's index exists so it can drop it. No index is
+		// built for this suite, and the 404 surfaces as a warning that fails the run.
+		// This filter is ElasticPress's own opt-out and is inert where it is absent.
+		add_filter( 'ep_sync_indexable_kill', '__return_true' );
+
 		update_blog_details( $site_id, [ 'archived' => 1 ] );
 
 		try {
@@ -177,6 +184,7 @@ class Test_Sites_Controller extends WP_UnitTestCase {
 			self::assertTrue( $sites[ $site_id ]['archived'] );
 		} finally {
 			update_blog_details( $site_id, [ 'archived' => 0 ] );
+			remove_filter( 'ep_sync_indexable_kill', '__return_true' );
 		}
 	}
 }
