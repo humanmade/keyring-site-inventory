@@ -49,6 +49,26 @@ jobs:
       - name: Lint PHP syntax
         run: composer lint
 
+  # The dev toolchain (humanmade/coding-standards) requires PHP 8.2, but the
+  # plugin itself supports 8.1 so it can run on the private H2 network's
+  # Bitnami stack. Lint the source on 8.1 to keep that floor honest.
+  php81:
+    name: PHP 8.1 syntax
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          coverage: none
+
+      - name: Lint PHP syntax
+        run: find . \( -path ./vendor -o -path ./wordpress \) -prune -o -name '*.php' -print0 | xargs -0 -n1 -P4 php -l
+
   phpunit:
     name: PHPUnit (${{ matrix.wordpress }})
     runs-on: ubuntu-latest
