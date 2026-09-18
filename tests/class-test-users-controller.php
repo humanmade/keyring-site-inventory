@@ -183,7 +183,7 @@ class Test_Users_Controller extends WP_UnitTestCase {
 		self::assertSame( array_keys( $data ), range( 0, count( $data ) - 1 ), 'The body is a list, not an object.' );
 
 		$user = $data[0];
-		foreach ( [ 'id', 'username', 'name', 'slug', 'email', 'registered_date', 'is_super_admin', 'memberships' ] as $field ) {
+		foreach ( [ 'id', 'username', 'name', 'slug', 'email', 'registered_date', 'is_super_admin', 'is_spam', 'is_deleted', 'is_disabled', 'memberships' ] as $field ) {
 			self::assertArrayHasKey( $field, $user );
 		}
 	}
@@ -239,6 +239,7 @@ class Test_Users_Controller extends WP_UnitTestCase {
 		$schema = call_user_func( $options['schema'] );
 		self::assertSame( 'keyring-site-inventory-user', $schema['title'] );
 		self::assertArrayHasKey( 'memberships', $schema['properties'] );
+		self::assertArrayHasKey( 'is_disabled', $schema['properties'] );
 
 		$data = $this->dispatch()->get_data();
 		self::assertArrayNotHasKey( 'schema', $data[0] );
@@ -286,6 +287,56 @@ class Test_Users_Controller extends WP_UnitTestCase {
 		$membership = $this->membership_for( $this->person );
 
 		self::assertSame( [], $membership['roles'] );
+	}
+
+	/** An ordinary account is not reported as disabled. */
+	public function test_account_is_not_disabled_by_default() : void {
+		self::assertFalse( $this->user_in_response( $this->person )['is_disabled'] );
+	}
+
+	/**
+	 * The Disable Accounts flag is reported as is_disabled.
+	 *
+	 * The plugin withdraws access at runtime and deliberately keeps stored roles, so
+	 * the roles alone read as current access. The flag is what says otherwise, which
+	 * makes it the field a consumer has to be able to trust.
+	 */
+	public function test_disabled_account_is_reported() : void {
+		update_user_meta( $this->person, '_hm_disableaccounts_disabled', 'yes' );
+		clean_user_cache( $this->person );
+
+		self::assertTrue( $this->user_in_response( $this->person )['is_disabled'] );
+
+		// The stored role and the membership survive disabling, by design.
+		self::assertSame( [ 'subscriber' ], $this->membership_for( $this->person )['roles'] );
+	}
+
+	/** A re-enabled account is no longer reported as disabled. */
+	public function test_reenabled_account_is_not_reported_as_disabled() : void {
+		update_user_meta( $this->person, '_hm_disableaccounts_disabled', 'yes' );
+		clean_user_cache( $this->person );
+		self::assertTrue( $this->user_in_response( $this->person )['is_disabled'] );
+
+		delete_user_meta( $this->person, '_hm_disableaccounts_disabled' );
+		clean_user_cache( $this->person );
+
+		self::assertFalse( $this->user_in_response( $this->person )['is_disabled'] );
+	}
+
+	/**
+	 * Disabling is not a role change, so the field is independent of memberships.
+	 *
+	 * A disabled account can still hold administrator and super admin reach on
+	 * paper, which a consumer must not read as usable access.
+	 */
+	public function test_disabled_administrator_keeps_its_administrator_role_but_is_flagged() : void {
+		update_user_meta( $this->administrator, '_hm_disableaccounts_disabled', 'yes' );
+		clean_user_cache( $this->administrator );
+
+		$user = $this->user_in_response( $this->administrator );
+
+		self::assertTrue( $user['is_disabled'] );
+		self::assertContains( 'administrator', $this->membership_for( $this->administrator )['roles'] );
 	}
 
 	/** Registration dates are reported in UTC, whatever the site timezone. */

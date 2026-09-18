@@ -27,6 +27,7 @@ A user record:
       "is_super_admin": false,
       "is_spam": false,
       "is_deleted": false,
+      "is_disabled": false,
       "memberships": [
         { "site_id": 2, "roles": [ "subscriber" ], "implied_by_super_admin": false }
       ]
@@ -101,6 +102,24 @@ is still a member of that site, matching WordPress.
 Super admins reach every site on a network without being a member of each one.
 Those sites appear in `memberships` with `implied_by_super_admin` set and an empty
 role list, which keeps implied reach and observed membership distinguishable.
+
+`is_disabled` reports the [Disable Accounts](https://github.com/humanmade/disable-accounts)
+flag (`_hm_disableaccounts_disabled`), which Human Made properties run through the
+Altis Security `disable-accounts` feature. That plugin withdraws access at runtime:
+it randomises the password, drops the sessions and wipes capabilities through
+`user_has_cap`. It leaves the stored per-site roles in place so access can be
+restored later, which means **the roles on a disabled account are not evidence the
+account can sign in**. `is_disabled` is, and a consumer that reads this roster must
+treat a disabled account as deactivated rather than as a current member with roles.
+Where the Disable Accounts plugin is loaded its own `is_disabled()` decides the
+answer; the flag is otherwise read directly, so the route reports the same fact on
+a network that has the meta but not the plugin. The field is absent only on a
+release older than this one, and a consumer should treat absent as unknown rather
+than false: defaulting it would present a disabled account's retained roles as
+current access.
+
+The routes return no login or last-login state, so a listed account that is not
+disabled is still only assumed active.
 
 ## Layout
 

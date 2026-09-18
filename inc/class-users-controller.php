@@ -190,6 +190,10 @@ class Users_Controller extends Inventory_Controller {
 			$data['is_deleted'] = isset( $user->data->deleted ) ? (bool) $user->data->deleted : false;
 		}
 
+		if ( rest_is_field_included( 'is_disabled', $fields ) ) {
+			$data['is_disabled'] = user_is_disabled( $user );
+		}
+
 		if ( rest_is_field_included( 'memberships', $fields ) ) {
 			$data['memberships'] = $this->memberships[ (int) $user->ID ] ?? [];
 		}
@@ -460,6 +464,12 @@ class Users_Controller extends Inventory_Controller {
 				],
 				'is_deleted'      => [
 					'description' => __( 'Whether the user is flagged as deleted on the network.', 'keyring-site-inventory' ),
+					'type'        => 'boolean',
+					'context'     => [ 'view', 'edit' ],
+					'readonly'    => true,
+				],
+				'is_disabled'     => [
+					'description' => __( 'Whether the user\'s account is disabled. A disabled account cannot sign in even where stored roles remain.', 'keyring-site-inventory' ),
 					'type'        => 'boolean',
 					'context'     => [ 'view', 'edit' ],
 					'readonly'    => true,
